@@ -1,26 +1,38 @@
+"""Hand-written MCP surface for Presenton (fork patch).
+
+Upstream builds the MCP server with FastMCP.from_openapi — an auto-generated
+proxy whose tool schemas are thin and whose responses keep whatever envelope
+the REST endpoint returned. This module replaces it with explicit tools so
+the contract is deliberate:
+
+  list_templates        -> GET  /api/v1/ppt/template/all (items carry
+                           `template_arg` — the exact string to pass as
+                           `template` to generate_presentation)
+  generate_presentation -> POST /api/v1/ppt/presentation/generate
+                           -> {presentation_id, path, edit_path,
+                              download_url?, edit_url?}
+  get_presentation      -> GET  /api/v1/ppt/presentation/{id}
+  get_generation_status -> GET  /api/v1/ppt/presentation/status/{id}
+
+Auth plumbing (PresentonTokenVerifier, bearer forwarding) is unchanged.
+"""
 import sys
 import argparse
 import asyncio
 import traceback
-from pathlib import Path
 
 import httpx
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from fastmcp.server.dependencies import get_access_token, get_http_headers
-import json
 
 from utils.get_env import is_disable_auth_enabled, is_presenton_electron_desktop
 from utils.simple_auth import is_auth_configured, validate_session_token
 
-OPENAPI_SPEC_PATH = Path(__file__).with_name("openai_spec.json")
 MCP_API_BASE_URL = "http://127.0.0.1:8000"
 # Presentation generation can take several minutes; keep MCP upstream reads open.
 MCP_API_TIMEOUT_SECONDS = 600.0
 MCP_API_CONNECT_TIMEOUT_SECONDS = 15.0
-
-with OPENAPI_SPEC_PATH.open("r", encoding="utf-8") as f:
-    openapi_spec = json.load(f)
 
 
 class PresentonTokenVerifier(TokenVerifier):
@@ -58,7 +70,7 @@ def get_mcp_api_timeout() -> httpx.Timeout:
     )
 
 
-def create_openapi_api_client() -> httpx.AsyncClient:
+def create_api_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=MCP_API_BASE_URL,
         timeout=get_mcp_api_timeout(),
@@ -82,6 +94,92 @@ async def attach_request_auth_header(request: httpx.Request) -> None:
         request.headers["Authorization"] = incoming_auth_header
 
 
+def create_mcp_server(name: str = "Presenton") -> FastMCP:
+    """Explicit tool surface — one tool per operation, responses unwrapped."""
+    mcp = FastMCP(name, auth=create_mcp_auth_provider())
+
+    @mcp.tool()
+    async def list_templates() -> list[dict]:
+        """List available presentation templates.
+
+        Each item has `template_arg` — pass that string verbatim as the
+        `template` argument of generate_presentation (`custom-<uuid>` for
+        uploaded/seeded templates, a group name for built-ins).
+        """
+        async with create_api_client() as client:
+            resp = await client.get("/api/v1/ppt/template/all")
+            resp.raise_for_status()
+            return resp.json()
+
+    @mcp.tool()
+    async def generate_presentation(
+        content: str,
+        template: str = "general",
+        n_slides: int | None = None,
+        language: str | None = None,
+        export_as: str = "pptx",
+        instructions: str | None = None,
+        slides_markdown: list[str] | None = None,
+        tone: str = "default",
+        verbosity: str = "standard",
+        web_search: bool = False,
+        include_title_slide: bool = True,
+        include_table_of_contents: bool = False,
+    ) -> dict:
+        """Generate a presentation and return its file + editor links.
+
+        `template`: use a `template_arg` from list_templates.
+        `slides_markdown`: supply ready-made per-slide markdown to skip
+        outline generation (fewer model calls, deterministic structure).
+        Response includes `download_url`/`edit_url` (absolute, browser-ready)
+        when the server has PUBLIC_BASE_URL configured — always prefer those
+        when showing links to users; `path`/`edit_path` are container-relative.
+        """
+        payload = {
+            "content": content,
+            "template": template,
+            "export_as": export_as,
+            "tone": tone,
+            "verbosity": verbosity,
+            "web_search": web_search,
+            "include_title_slide": include_title_slide,
+            "include_table_of_contents": include_table_of_contents,
+            "trigger_webhook": False,
+        }
+        for key, value in (
+            ("n_slides", n_slides),
+            ("language", language),
+            ("instructions", instructions),
+            ("slides_markdown", slides_markdown),
+        ):
+            if value is not None:
+                payload[key] = value
+
+        async with create_api_client() as client:
+            resp = await client.post("/api/v1/ppt/presentation/generate", json=payload)
+            resp.raise_for_status()
+            return resp.json()
+
+    @mcp.tool()
+    async def get_presentation(presentation_id: str) -> dict:
+        """Fetch a presentation with its slides (structured slide content)."""
+        async with create_api_client() as client:
+            resp = await client.get(f"/api/v1/ppt/presentation/{presentation_id}")
+            resp.raise_for_status()
+            return resp.json()
+
+    @mcp.tool()
+    async def get_generation_status(presentation_id: str) -> dict:
+        """Poll the async task status of a presentation generation."""
+        async with create_api_client() as client:
+            resp = await client.get(
+                f"/api/v1/ppt/presentation/status/{presentation_id}")
+            resp.raise_for_status()
+            return resp.json()
+
+    return mcp
+
+
 async def main():
     try:
         if not is_mcp_server_enabled():
@@ -91,45 +189,24 @@ async def main():
             )
             return
 
-        print("DEBUG: MCP (OpenAPI) Server startup initiated")
-        parser = argparse.ArgumentParser(
-            description="Run the MCP server (from OpenAPI)"
-        )
+        parser = argparse.ArgumentParser(description="Run the Presenton MCP server")
         parser.add_argument(
             "--port", type=int, default=8001, help="Port for the MCP HTTP server"
         )
-
         parser.add_argument(
-            "--name",
-            type=str,
-            default="Presenton API (OpenAPI)",
-            help="Display name for the generated MCP server",
+            "--name", type=str, default="Presenton", help="MCP server display name"
         )
         args = parser.parse_args()
-        print(f"DEBUG: Parsed args - port={args.port}")
 
-        async with create_openapi_api_client() as api_client:
-            # Build MCP server from OpenAPI
-            print("DEBUG: Creating FastMCP server from OpenAPI spec...")
-            mcp_auth_provider = create_mcp_auth_provider()
-            mcp = FastMCP.from_openapi(
-                openapi_spec=openapi_spec,
-                client=api_client,
-                name=args.name,
-                auth=mcp_auth_provider,
-            )
-            print("DEBUG: MCP server created from OpenAPI successfully")
+        mcp = create_mcp_server(args.name)
 
-            # Start the MCP server
-            uvicorn_config = {"reload": True}
-            print(f"DEBUG: Starting MCP server on host=127.0.0.1, port={args.port}")
-            await mcp.run_async(
-                transport="http",
-                host="127.0.0.1",
-                port=args.port,
-                uvicorn_config=uvicorn_config,
-            )
-            print("DEBUG: MCP server run_async completed")
+        print(f"DEBUG: Starting explicit MCP server on 127.0.0.1:{args.port}")
+        await mcp.run_async(
+            transport="http",
+            host="127.0.0.1",
+            port=args.port,
+            uvicorn_config={"reload": True},
+        )
     except Exception as e:
         print(f"ERROR: MCP server startup failed: {e}")
         print(f"ERROR: Traceback: {traceback.format_exc()}")
@@ -137,7 +214,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    print("DEBUG: Starting MCP (OpenAPI) main function")
     try:
         asyncio.run(main())
     except Exception as e:
