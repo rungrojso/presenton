@@ -1403,6 +1403,7 @@ async def list_all_templates_for_tools(
             "description": "Built-in layout group",
             "builtin": True,
             "template_arg": name,
+            "total_layouts": None,
         }
         for name in DEFAULT_TEMPLATES
     ]
@@ -1428,9 +1429,11 @@ async def list_all_templates_for_tools(
                 "description": description,
                 "builtin": False,
                 "is_default": is_default,
-                "layout_count": layout_count,
+                "total_layouts": layout_count,
                 "template_arg": f"custom-{template_id}",
             }
         )
 
-    return {"items": builtins + customs, "total": len(builtins) + len(customs)}
+    # Spec shape is a bare array (TemplateDetail[]) — the MCP tool wrapper
+    # validates against openai_spec.json, so an {items,total} envelope fails.
+    return builtins + customs
