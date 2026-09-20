@@ -134,6 +134,9 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
         Response includes `download_url`/`edit_url` (absolute, browser-ready)
         when the server has PUBLIC_BASE_URL configured — always prefer those
         when showing links to users; `path`/`edit_path` are container-relative.
+        `artifact_html` is a ready-made <iframe> snippet: emit it inside a
+        fenced ```html block so the chat client renders the deck in its
+        artifact/preview panel.
         """
         payload = {
             "content": content,
@@ -158,7 +161,18 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
         async with create_api_client() as client:
             resp = await client.post("/api/v1/ppt/presentation/generate", json=payload)
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+
+        # artifact_html: drop-in snippet clients can render in a side-panel
+        # (LibreChat artifacts render fenced ```html blocks verbatim).
+        frame_src = result.get("edit_url") or result.get("edit_path") or result.get("path")
+        if frame_src:
+            result["artifact_html"] = (
+                f'<iframe src="{frame_src}" '
+                'style="width:100%;height:640px;border:none;border-radius:8px" '
+                'allowfullscreen></iframe>'
+            )
+        return result
 
     @mcp.tool()
     async def get_presentation(presentation_id: str) -> dict:
