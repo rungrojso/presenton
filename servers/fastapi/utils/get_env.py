@@ -398,3 +398,10 @@ def get_openai_compat_image_api_key_env():
 
 def get_openai_compat_image_model_env():
     return os.getenv("OPENAI_COMPAT_IMAGE_MODEL")
+
+
+# Public base URL the server is reachable at from a user's browser
+# (e.g. http://localhost:5001). Used to expand container-relative paths
+# into clickable URLs in API/tool responses.
+def get_public_base_url_env():
+    return (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")

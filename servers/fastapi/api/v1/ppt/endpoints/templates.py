@@ -1381,3 +1381,56 @@ async def delete_template_v2(
     await sql_session.delete(template)
     await sql_session.commit()
     return Response(status_code=204)
+
+
+@TEMPLATE_ASSETS_ROUTER.get("/all")
+async def list_all_templates_for_tools(
+    sql_session: AsyncSession = Depends(get_async_session),
+):
+    """Combined template list for MCP/tool callers.
+
+    The OpenAPI-driven MCP server points `templates_list` here. Each item
+    carries `template_arg` — the exact string to pass as `template` to
+    generate: builtin groups take their name, DB templates take
+    `custom-<uuid>` (see _extract_custom_template_id in presentation.py).
+    """
+    from constants.presentation import DEFAULT_TEMPLATES
+
+    builtins = [
+        {
+            "id": name,
+            "name": name.replace("-", " ").title(),
+            "description": "Built-in layout group",
+            "builtin": True,
+            "template_arg": name,
+        }
+        for name in DEFAULT_TEMPLATES
+    ]
+
+    result = await sql_session.execute(
+        select(
+            TemplateV2.id,
+            TemplateV2.name,
+            TemplateV2.description,
+            TemplateV2.layouts,
+            TemplateV2.is_default,
+        ).order_by(TemplateV2.created_at.desc())
+    )
+    customs = []
+    for template_id, name, description, layouts, is_default in result.all():
+        layout_count = _count_layouts(layouts)
+        if layout_count == 0:
+            continue
+        customs.append(
+            {
+                "id": str(template_id),
+                "name": name,
+                "description": description,
+                "builtin": False,
+                "is_default": is_default,
+                "layout_count": layout_count,
+                "template_arg": f"custom-{template_id}",
+            }
+        )
+
+    return {"items": builtins + customs, "total": len(builtins) + len(customs)}

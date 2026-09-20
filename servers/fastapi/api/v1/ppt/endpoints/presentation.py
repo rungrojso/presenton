@@ -89,6 +89,7 @@ from utils.get_layout_by_name import get_layout_by_name
 from utils.icon_weights import DEFAULT_ICON_TYPE, extract_icon_type_from_settings
 from utils.llm_utils import message_content_to_text
 from utils.sse import safe_sse_stream
+from utils.get_env import get_public_base_url_env
 from utils.simple_auth import (
     SESSION_COOKIE_NAME,
     create_session_token,
@@ -104,6 +105,20 @@ logger = logging.getLogger(__name__)
 
 PRESENTATION_ROUTER = APIRouter(prefix="/presentation", tags=["Presentation"])
 ASYNC_TASK_TYPE_PRESENTATION_GENERATE = "presentation.generate"
+
+
+def _attach_public_urls(response: PresentationPathAndEditPath):
+    """Expand container-relative paths into browser-usable absolute URLs.
+
+    API/MCP callers run outside this container — `path`/`edit_path` alone are
+    not resolvable for them. When PUBLIC_BASE_URL is set, also return
+    download_url/edit_url so clients can render a working link directly.
+    """
+    base = get_public_base_url_env()
+    if base:
+        response.download_url = f"{base}{response.path}"
+        response.edit_url = f"{base}{response.edit_path}"
+    return response
 
 
 def _presentation_task_progress_data(
@@ -2517,9 +2532,11 @@ async def generate_presentation_handler(
             cookie_header=export_cookie_header,
         )
 
-        response = PresentationPathAndEditPath(
-            **presentation_and_path.model_dump(),
-            edit_path=f"/presentation?id={presentation_id}",
+        response = _attach_public_urls(
+            PresentationPathAndEditPath(
+                **presentation_and_path.model_dump(),
+                edit_path=f"/presentation?id={presentation_id}",
+            )
         )
 
         if async_status:
@@ -2721,9 +2738,11 @@ async def edit_presentation_with_new_content(
         cookie_header=_build_export_cookie_header(request_http),
     )
 
-    return PresentationPathAndEditPath(
-        **presentation_and_path.model_dump(),
-        edit_path=f"/presentation?id={presentation.id}",
+    return _attach_public_urls(
+        PresentationPathAndEditPath(
+            **presentation_and_path.model_dump(),
+            edit_path=f"/presentation?id={presentation.id}",
+        )
     )
 
 
@@ -2765,7 +2784,9 @@ async def derive_presentation_from_existing_one(
         cookie_header=_build_export_cookie_header(request_http),
     )
 
-    return PresentationPathAndEditPath(
-        **presentation_and_path.model_dump(),
-        edit_path=f"/presentation?id={new_presentation.id}",
+    return _attach_public_urls(
+        PresentationPathAndEditPath(
+            **presentation_and_path.model_dump(),
+            edit_path=f"/presentation?id={new_presentation.id}",
+        )
     )
