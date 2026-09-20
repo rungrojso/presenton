@@ -114,6 +114,20 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
             return resp.json()
 
     @mcp.tool()
+    async def get_template_layouts(template: str) -> list[dict]:
+        """List a template's slide layouts with their json_schema.
+
+        `template` is a `template_arg` from list_templates. Each entry has
+        `index` + `json_schema` — use them to author `slides_content` for
+        render-only generation (zero LLM calls on the server; the caller's
+        model writes every field).
+        """
+        async with create_api_client() as client:
+            resp = await client.get(f"/api/v1/ppt/presentation/layouts/{template}")
+            resp.raise_for_status()
+            return resp.json()
+
+    @mcp.tool()
     async def generate_presentation(
         content: str,
         template: str = "general",
@@ -122,6 +136,7 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
         export_as: str = "pptx",
         instructions: str | None = None,
         slides_markdown: list[str] | None = None,
+        slides_content: list[dict] | None = None,
         tone: str = "default",
         verbosity: str = "standard",
         web_search: bool = False,
@@ -133,6 +148,10 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
         `template`: use a `template_arg` from list_templates.
         `slides_markdown`: supply ready-made per-slide markdown to skip
         outline generation (fewer model calls, deterministic structure).
+        `slides_content`: RENDER-ONLY mode — pass
+        [{layout_index, content, speaker_note?}] authored against
+        get_template_layouts' json_schemas; skips ALL server-side LLM calls
+        so the caller's model owns 100% of the writing.
         Response includes `download_url`/`edit_url` (absolute, browser-ready)
         when the server has PUBLIC_BASE_URL configured — always prefer those
         when showing links to users; `path`/`edit_path` are container-relative.
@@ -156,6 +175,7 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
             ("language", language),
             ("instructions", instructions),
             ("slides_markdown", slides_markdown),
+            ("slides_content", slides_content),
         ):
             if value is not None:
                 payload[key] = value

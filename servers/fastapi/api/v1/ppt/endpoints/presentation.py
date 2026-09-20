@@ -132,6 +132,8 @@ def _presentation_task_progress_data(
 
 
 def _requested_slide_count(request: GeneratePresentationRequest) -> int:
+    if request.slides_content:
+        return len(request.slides_content)
     if request.slides_markdown:
         return len(request.slides_markdown)
     return request.n_slides or 0
@@ -1508,6 +1510,32 @@ async def get_all_presentations(
     return presentations_with_slides
 
 
+@PRESENTATION_ROUTER.get("/layouts/{template_arg}")
+async def get_template_slide_layouts(
+    template_arg: str,
+    sql_session: AsyncSession = Depends(get_async_session),
+):
+    """Resolved slide layouts for a template arg (`general` or `custom-<uuid>`).
+
+    Each entry carries `index` (the value `slides_content[].layout_index`
+    expects), the layout `id`, and its `json_schema` — everything a caller
+    needs to author slide contents in render-only mode without any LLM calls.
+    """
+    _, layout_model, _, _ = await _resolve_generation_layout(
+        template_arg, sql_session
+    )
+    return [
+        {
+            "index": index,
+            "id": slide.id,
+            "name": slide.name,
+            "description": slide.description,
+            "json_schema": slide.json_schema,
+        }
+        for index, slide in enumerate(layout_model.slides)
+    ]
+
+
 @PRESENTATION_ROUTER.get("/{id}", response_model=PresentationDetailWithSlides)
 async def get_presentation(
     id: uuid.UUID,
@@ -2078,8 +2106,13 @@ async def check_if_api_request_is_valid(
     presentation_id = uuid.uuid4()
     print(f"Presentation ID: {presentation_id}")
 
-    # Making sure either content, slides markdown or files is provided
-    if not (request.content or request.slides_markdown or request.files):
+    # Making sure either content, slides markdown, slides content or files is provided
+    if not (
+        request.content
+        or request.slides_markdown
+        or request.slides_content
+        or request.files
+    ):
         raise HTTPException(
             status_code=400,
             detail="Either content or slides markdown or files is required to generate presentation",
@@ -2142,10 +2175,19 @@ async def generate_presentation_handler(
 ):
     try:
         using_slides_markdown = False
+        using_slides_content = False
         language_to_use = (request.language or "").strip() or None
         additional_context = ""
 
-        if request.slides_markdown:
+        if request.slides_content:
+            if len(request.slides_content) > MAX_NUMBER_OF_SLIDES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Number of slides cannot be greater than {MAX_NUMBER_OF_SLIDES}",
+                )
+            using_slides_content = True
+            request.n_slides = len(request.slides_content)
+        elif request.slides_markdown:
             using_slides_markdown = True
             if len(request.slides_markdown) > MAX_NUMBER_OF_SLIDES:
                 raise HTTPException(
@@ -2154,7 +2196,7 @@ async def generate_presentation_handler(
                 )
             request.n_slides = len(request.slides_markdown)
 
-        if not using_slides_markdown:
+        if not using_slides_markdown and not using_slides_content:
             # Updating async status
             if async_status:
                 async_status.message = "Generating presentation outlines"
@@ -2265,7 +2307,7 @@ async def generate_presentation_handler(
 
             total_outlines = len(presentation_outlines.slides)
 
-        else:
+        elif using_slides_markdown:
             # Setting outlines to slides markdown
             presentation_outlines = PresentationOutlineModel(
                 slides=[
@@ -2283,6 +2325,18 @@ async def generate_presentation_handler(
                 source_content=request.content,
                 instructions=request.instructions,
             )
+
+        else:
+            # Render-only mode: caller already authored every slide, so there
+            # are no outlines to persist — keep a stub so downstream code that
+            # touches presentation_outlines still works.
+            presentation_outlines = PresentationOutlineModel(
+                slides=[
+                    SlideOutlineModel(content="")
+                    for _ in request.slides_content
+                ]
+            )
+            total_outlines = len(request.slides_content)
 
         await MEM0_PRESENTATION_MEMORY_SERVICE.store_generated_outlines(
             presentation_id,
@@ -2319,8 +2373,13 @@ async def generate_presentation_handler(
         )
         total_slide_layouts = len(layout_model.slides)
 
-        # Generate Structure
-        if layout_model.ordered:
+        # Generate Structure — skipped entirely when the caller supplied
+        # per-slide contents (their layout_index picks the layout directly).
+        if using_slides_content:
+            presentation_structure = PresentationStructureModel(
+                slides=[item.layout_index for item in request.slides_content]
+            )
+        elif layout_model.ordered:
             presentation_structure = layout_model.to_presentation_structure()
         else:
             presentation_structure: PresentationStructureModel = (
@@ -2342,7 +2401,9 @@ async def generate_presentation_handler(
                 presentation_structure.slides[index] = random_slide_index
 
         should_include_toc = (
-            request.include_table_of_contents and not using_slides_markdown
+            request.include_table_of_contents
+            and not using_slides_markdown
+            and not using_slides_content
         )
         if should_include_toc:
             n_toc_slides = get_no_of_toc_required_for_n_outlines(
@@ -2420,19 +2481,29 @@ async def generate_presentation_handler(
 
             print(f"Generating slides from {start} to {end}")
 
-            # Generate contents for this batch concurrently
-            content_tasks = [
-                get_slide_content_from_type_and_outline(
-                    slide_layouts[i],
-                    presentation_outlines.slides[i],
-                    language_to_use,
-                    request.tone.value,
-                    request.verbosity.value,
-                    request.instructions,
-                )
-                for i in range(start, end)
-            ]
-            batch_contents: List[dict] = await asyncio.gather(*content_tasks)
+            if using_slides_content:
+                # Caller authored the slide payloads; fold speaker notes into
+                # the __speaker_note__ key the SlideModel builder reads.
+                batch_contents = []
+                for item in request.slides_content[start:end]:
+                    slide_content = dict(item.content)
+                    if item.speaker_note:
+                        slide_content["__speaker_note__"] = item.speaker_note
+                    batch_contents.append(slide_content)
+            else:
+                # Generate contents for this batch concurrently
+                content_tasks = [
+                    get_slide_content_from_type_and_outline(
+                        slide_layouts[i],
+                        presentation_outlines.slides[i],
+                        language_to_use,
+                        request.tone.value,
+                        request.verbosity.value,
+                        request.instructions,
+                    )
+                    for i in range(start, end)
+                ]
+                batch_contents: List[dict] = await asyncio.gather(*content_tasks)
 
             # Build slides for this batch
             batch_slides: List[SlideModel] = []

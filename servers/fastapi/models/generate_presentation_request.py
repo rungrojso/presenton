@@ -5,10 +5,35 @@ from enums.tone import Tone
 from enums.verbosity import Verbosity
 
 
+class SlideContentInput(BaseModel):
+    """Caller-supplied slide payload — skips all LLM calls (render-only mode).
+
+    `layout_index` points into the template's layout list (see
+    GET /presentation/layouts/{template}); `content` must satisfy that
+    layout's json_schema.
+    """
+
+    layout_index: int = Field(
+        ..., description="Index into the template's slide layout list"
+    )
+    content: dict = Field(
+        default_factory=dict,
+        description="Field values matching the chosen layout's json_schema",
+    )
+    speaker_note: Optional[str] = Field(
+        default=None, description="Speaker notes for this slide"
+    )
+
+
 class GeneratePresentationRequest(BaseModel):
     content: str = Field(..., description="The content for generating the presentation")
     slides_markdown: Optional[List[str]] = Field(
         default=None, description="The markdown for the slides"
+    )
+    slides_content: Optional[List[SlideContentInput]] = Field(
+        default=None,
+        description="Ready-made slide contents keyed to layout indices; "
+        "when set, no LLM calls are made — the caller is the author",
     )
     instructions: Optional[str] = Field(
         default=None, description="The instruction for generating the presentation"
