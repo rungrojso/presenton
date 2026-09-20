@@ -17,6 +17,7 @@ the contract is deliberate:
 Auth plumbing (PresentonTokenVerifier, bearer forwarding) is unchanged.
 """
 import sys
+import json
 import argparse
 import asyncio
 import traceback
@@ -25,6 +26,7 @@ import httpx
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from fastmcp.server.dependencies import get_access_token, get_http_headers
+from mcp.types import EmbeddedResource, TextContent, TextResourceContents
 
 from utils.get_env import is_disable_auth_enabled, is_presenton_electron_desktop
 from utils.simple_auth import is_auth_configured, validate_session_token
@@ -134,9 +136,9 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
         Response includes `download_url`/`edit_url` (absolute, browser-ready)
         when the server has PUBLIC_BASE_URL configured — always prefer those
         when showing links to users; `path`/`edit_path` are container-relative.
-        `artifact_html` is a ready-made <iframe> snippet: emit it inside a
-        fenced ```html block so the chat client renders the deck in its
-        artifact/preview panel.
+        The result also embeds a `ui://` resource: clients supporting MCP-UI
+        render the interactive slide editor inline where you place the
+        `\\ui{resource-id}` marker shown in the result text.
         """
         payload = {
             "content": content,
@@ -163,16 +165,24 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
             resp.raise_for_status()
             result = resp.json()
 
-        # artifact_html: drop-in snippet clients can render in a side-panel
-        # (LibreChat artifacts render fenced ```html blocks verbatim).
+        # MCP-UI resource: `ui://` URIs are lifted into a UIResource artifact by
+        # MCP-UI-capable clients (LibreChat renders it inline where the model
+        # places the \ui{id} marker). `text/uri-list` loads the remote editor
+        # URL directly, so the deck is fully interactive — not a static preview.
         frame_src = result.get("edit_url") or result.get("edit_path") or result.get("path")
+        content = [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
         if frame_src:
-            result["artifact_html"] = (
-                f'<iframe src="{frame_src}" '
-                'style="width:100%;height:640px;border:none;border-radius:8px" '
-                'allowfullscreen></iframe>'
+            content.append(
+                EmbeddedResource(
+                    type="resource",
+                    resource=TextResourceContents(
+                        uri=f"ui://presenton/deck/{result.get('presentation_id', 'unknown')}",
+                        mimeType="text/uri-list",
+                        text=frame_src,
+                    ),
+                )
             )
-        return result
+        return content
 
     @mcp.tool()
     async def get_presentation(presentation_id: str) -> dict:
