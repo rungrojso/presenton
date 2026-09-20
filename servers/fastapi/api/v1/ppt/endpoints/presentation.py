@@ -1536,6 +1536,32 @@ async def get_template_slide_layouts(
     ]
 
 
+@PRESENTATION_ROUTER.get("/layout-payload/{template_arg}")
+async def get_template_layout_payload(
+    template_arg: str,
+    sql_session: AsyncSession = Depends(get_async_session),
+):
+    """Raw layout definition for a template arg — the caller's starting point
+    for pixel-level control.
+
+    Returns the full template-v2 payload (layouts → components → position,
+    size, elements). Edit it and pass it back as `layout_payload` on
+    generate to render your own geometry instead of the stored template's.
+    """
+    template_v2 = await _resolve_requested_template_v2(template_arg, sql_session)
+    if template_v2:
+        return _copy_template_v2_layout_payload(template_v2)
+
+    if template_arg not in DEFAULT_TEMPLATES:
+        raise HTTPException(
+            status_code=400,
+            detail="Template not found. Please use a valid template.",
+        )
+
+    layout_model = await get_layout_by_name(template_arg)
+    return layout_model.model_dump(mode="json")
+
+
 @PRESENTATION_ROUTER.get("/{id}", response_model=PresentationDetailWithSlides)
 async def get_presentation(
     id: uuid.UUID,
@@ -2149,8 +2175,9 @@ async def check_if_api_request_is_valid(
             detail="Number of slides cannot be less than 3 if table of contents is included",
         )
 
-    # Checking if template is valid
-    if request.template not in DEFAULT_TEMPLATES:
+    # Checking if template is valid — skipped when the caller supplies their
+    # own inline layout payload (there is no stored template to resolve).
+    if request.layout_payload is None and request.template not in DEFAULT_TEMPLATES:
         template_v2 = await _resolve_requested_template_v2(
             request.template,
             sql_session,
@@ -2358,12 +2385,23 @@ async def generate_presentation_handler(
             request.template,
             presentation_id,
         )
-        (
-            layout_payload,
-            layout_model,
-            template_fonts,
-            is_template_v2,
-        ) = await _resolve_generation_layout(request.template, sql_session)
+        if request.layout_payload is not None:
+            # Inline template: the caller owns the component geometry, so the
+            # payload also drives the per-slide `ui` rendering path.
+            layout_payload = request.layout_payload
+            layout_model = _build_template_v2_layout_model(
+                layout_payload,
+                layout_name="template-v2-inline",
+            )
+            template_fonts = None
+            is_template_v2 = True
+        else:
+            (
+                layout_payload,
+                layout_model,
+                template_fonts,
+                is_template_v2,
+            ) = await _resolve_generation_layout(request.template, sql_session)
         logger.info(
             "[presentation.generate] layout ready template=%r slides=%d ordered=%s icon_weight=%s",
             request.template,

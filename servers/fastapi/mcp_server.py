@@ -128,6 +128,21 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
             return resp.json()
 
     @mcp.tool()
+    async def get_template_layout_payload(template: str) -> dict:
+        """Raw layout definition for a template — start here for pixel control.
+
+        Returns the template-v2 payload (layouts → components → position,
+        size, elements). Modify geometry, sizes, styles or elements, then
+        pass the result back as `layout_payload` on generate_presentation to
+        render your own layout instead of the stored template's.
+        """
+        async with create_api_client() as client:
+            resp = await client.get(
+                f"/api/v1/ppt/presentation/layout-payload/{template}")
+            resp.raise_for_status()
+            return resp.json()
+
+    @mcp.tool()
     async def generate_presentation(
         content: str,
         template: str = "general",
@@ -137,6 +152,7 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
         instructions: str | None = None,
         slides_markdown: list[str] | None = None,
         slides_content: list[dict] | None = None,
+        layout_payload: dict | None = None,
         tone: str = "default",
         verbosity: str = "standard",
         web_search: bool = False,
@@ -152,6 +168,10 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
         [{layout_index, content, speaker_note?}] authored against
         get_template_layouts' json_schemas; skips ALL server-side LLM calls
         so the caller's model owns 100% of the writing.
+        `layout_payload`: PIXEL-LEVEL mode — pass a full template-v2 layout
+        definition (from get_template_layout_payload, edited to taste) to
+        render your own component geometry instead of the stored template's.
+        Combine with slides_content for total control of layout and content.
         Response includes `download_url`/`edit_url` (absolute, browser-ready)
         when the server has PUBLIC_BASE_URL configured — always prefer those
         when showing links to users; `path`/`edit_path` are container-relative.
@@ -176,6 +196,7 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
             ("instructions", instructions),
             ("slides_markdown", slides_markdown),
             ("slides_content", slides_content),
+            ("layout_payload", layout_payload),
         ):
             if value is not None:
                 payload[key] = value

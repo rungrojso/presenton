@@ -35,6 +35,12 @@ class GeneratePresentationRequest(BaseModel):
         description="Ready-made slide contents keyed to layout indices; "
         "when set, no LLM calls are made — the caller is the author",
     )
+    layout_payload: Optional[dict] = Field(
+        default=None,
+        description="Inline template-v2 layout definition (layouts with "
+        "components, positions, sizes and elements). When set, the caller's "
+        "own geometry is rendered instead of a stored template's",
+    )
     instructions: Optional[str] = Field(
         default=None, description="The instruction for generating the presentation"
     )
