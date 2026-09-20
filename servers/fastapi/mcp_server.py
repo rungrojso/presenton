@@ -128,6 +128,61 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
             return resp.json()
 
     @mcp.tool()
+    async def list_chat_tools(presentation_id: str) -> list[dict]:
+        """Tool definitions for editing a stored presentation.
+
+        Returns the full editing vocabulary with JSON Schemas: add/update/
+        delete slides, read slide elements, add/update/move/style elements,
+        reusable blocks, themes, assets. Call this once, then drive edits
+        through `chat_tool` — no regeneration needed.
+        """
+        async with create_api_client() as client:
+            resp = await client.get(
+                "/api/v1/ppt/chat/tools",
+                params={"presentation_id": presentation_id},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    @mcp.tool()
+    async def chat_tool(
+        presentation_id: str,
+        tool_name: str,
+        arguments: dict | None = None,
+    ) -> dict:
+        """Edit a stored presentation by invoking one chat tool.
+
+        `tool_name` + `arguments` come from `list_chat_tools` (e.g.
+        updateSlideElement with {index, elementPath, text}, addNewSlideLayout,
+        setPresentationTheme, deleteSlide). Changes persist to the deck —
+        re-export with `get_presentation`/`edit`-style flow or open edit_url.
+        """
+        async with create_api_client() as client:
+            resp = await client.post(
+                "/api/v1/ppt/chat/tool",
+                json={
+                    "presentation_id": presentation_id,
+                    "tool_name": tool_name,
+                    "arguments": arguments or {},
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    @mcp.tool()
+    async def get_element_schema() -> dict:
+        """JSON schema for every slide element type.
+
+        The full element vocabulary (text, image, chart, table, flex, …) with
+        fields and enums — author or patch elements in layout_payload and
+        chat-tool element updates against this.
+        """
+        async with create_api_client() as client:
+            resp = await client.get("/api/v1/ppt/presentation/element-schema")
+            resp.raise_for_status()
+            return resp.json()
+
+    @mcp.tool()
     async def get_template_layout_payload(template: str) -> dict:
         """Raw layout definition for a template — start here for pixel control.
 
@@ -153,6 +208,7 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
         slides_markdown: list[str] | None = None,
         slides_content: list[dict] | None = None,
         layout_payload: dict | None = None,
+        theme: dict | None = None,
         tone: str = "default",
         verbosity: str = "standard",
         web_search: bool = False,
@@ -197,6 +253,7 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
             ("slides_markdown", slides_markdown),
             ("slides_content", slides_content),
             ("layout_payload", layout_payload),
+            ("theme", theme),
         ):
             if value is not None:
                 payload[key] = value
@@ -232,6 +289,48 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
             resp = await client.get(f"/api/v1/ppt/presentation/{presentation_id}")
             resp.raise_for_status()
             return resp.json()
+
+    @mcp.tool()
+    async def edit_presentation(
+        presentation_id: str,
+        slides: list[dict] | None = None,
+        export_as: str = "pptx",
+    ) -> dict:
+        """Update slide contents and re-export an existing presentation.
+
+        `slides`: [{index, content}] — content is deep-merged into that
+        slide's existing content, so partial updates are fine. Omit to just
+        re-export the current state. Returns fresh download_url/edit_url.
+        """
+        async with create_api_client() as client:
+            resp = await client.post(
+                "/api/v1/ppt/presentation/edit",
+                json={
+                    "presentation_id": presentation_id,
+                    "slides": slides or [],
+                    "export_as": export_as,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    @mcp.tool()
+    async def duplicate_presentation(presentation_id: str) -> dict:
+        """Duplicate a presentation (copy to iterate on without touching the original)."""
+        async with create_api_client() as client:
+            resp = await client.post(
+                f"/api/v1/ppt/presentation/{presentation_id}/duplicate")
+            resp.raise_for_status()
+            return resp.json()
+
+    @mcp.tool()
+    async def delete_presentation(presentation_id: str) -> dict:
+        """Delete a presentation permanently."""
+        async with create_api_client() as client:
+            resp = await client.delete(
+                f"/api/v1/ppt/presentation/{presentation_id}")
+            resp.raise_for_status()
+            return {"deleted": True, "presentation_id": presentation_id}
 
     @mcp.tool()
     async def get_generation_status(presentation_id: str) -> dict:

@@ -7,7 +7,7 @@ import os
 import random
 import re
 import traceback
-from typing import Annotated, Any, List, Literal, Optional, Tuple
+from typing import Annotated, Any, List, Literal, Optional, Tuple, get_args
 import dirtyjson
 from fastapi import (
     APIRouter,
@@ -506,6 +506,54 @@ def _insert_toc_layouts(
     insertion_index = 1 if include_title_slide else 0
     for i in range(n_toc_slides):
         structure.slides.insert(insertion_index + i, toc_slide_layout_index)
+
+
+def _validate_slides_content(
+    layout_model: PresentationLayoutModel,
+    slides_content: list[Any],
+) -> None:
+    """Fail fast when caller-authored slide content misses its layout schema.
+
+    Without this, a missing field renders an empty slide silently; with it,
+    the caller gets a field-by-field list of what to fix.
+    """
+    from jsonschema import Draft202012Validator
+
+    problems: list[str] = []
+    layout_total = len(layout_model.slides)
+    for position, item in enumerate(slides_content):
+        layout_index = item.layout_index
+        if layout_index < 0 or layout_index >= layout_total:
+            problems.append(
+                f"slide {position}: layout_index {layout_index} is out of "
+                f"range (0..{layout_total - 1})"
+            )
+            continue
+
+        schema = layout_model.slides[layout_index].json_schema
+        validator = Draft202012Validator(schema)
+        for error in sorted(
+            validator.iter_errors(item.content),
+            key=lambda error: list(error.path),
+        ):
+            field_path = ".".join(str(part) for part in error.path) or "(root)"
+            problems.append(
+                f"slide {position} (layout {layout_index}) field "
+                f"'{field_path}': {error.message}"
+            )
+            if len(problems) >= 20:
+                break
+        if len(problems) >= 20:
+            break
+
+    if problems:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "slides_content does not match the layout schema:\n- "
+                + "\n- ".join(problems)
+            ),
+        )
 
 
 def _layout_count(layout_payload: Any) -> int:
@@ -1536,6 +1584,46 @@ async def get_template_slide_layouts(
     ]
 
 
+@PRESENTATION_ROUTER.get("/element-schema")
+async def get_element_schema():
+    """JSON schema for every slide element type.
+
+    Covers the full element vocabulary (text, image, chart, table, flex, …)
+    with fields and enums — what a caller needs to author or patch elements
+    inside a layout_payload or a chat-tool element update.
+    """
+    from templates.v2.models.elements import (
+        Chart,
+        Container,
+        Ellipse,
+        Flex,
+        Grid,
+        Group,
+        Image,
+        Infographic,
+        Line,
+        Rectangle,
+        Table,
+        Text,
+        TextList,
+    )
+
+    models = [
+        Text, Container, Image, TextList, Table, Rectangle, Ellipse, Line,
+        Chart, Infographic, Flex, Grid, Group,
+    ]
+    elements = []
+    for model in models:
+        type_args = get_args(model.model_fields["type"].annotation)
+        elements.append(
+            {
+                "type": type_args[0] if type_args else model.__name__.lower(),
+                "schema": model.model_json_schema(),
+            }
+        )
+    return {"elements": elements}
+
+
 @PRESENTATION_ROUTER.get("/layout-payload/{template_arg}")
 async def get_template_layout_payload(
     template_arg: str,
@@ -2411,6 +2499,9 @@ async def generate_presentation_handler(
         )
         total_slide_layouts = len(layout_model.slides)
 
+        if using_slides_content:
+            _validate_slides_content(layout_model, request.slides_content)
+
         # Generate Structure — skipped entirely when the caller supplied
         # per-slide contents (their layout_index picks the layout directly).
         if using_slides_content:
@@ -2475,6 +2566,7 @@ async def generate_presentation_handler(
                 if is_template_v2
                 else PresentationVersion.V1_STANDARD
             ),
+            theme=request.theme,
             content=request.content,
             n_slides=final_n_slides,
             language=language_to_use or "",

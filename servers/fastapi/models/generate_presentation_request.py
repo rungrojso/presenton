@@ -41,6 +41,11 @@ class GeneratePresentationRequest(BaseModel):
         "components, positions, sizes and elements). When set, the caller's "
         "own geometry is rendered instead of a stored template's",
     )
+    theme: Optional[dict] = Field(
+        default=None,
+        description="Presentation theme (colors/fonts) applied to the whole "
+        "deck — same shape as the theme catalog entries",
+    )
     instructions: Optional[str] = Field(
         default=None, description="The instruction for generating the presentation"
     )

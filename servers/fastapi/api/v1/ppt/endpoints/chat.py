@@ -21,10 +21,71 @@ from models.sse_response import (
 )
 from services.chat import sql_chat_history
 from services.chat import ChatTurnResult, PresentationChatService
+from services.chat.presentation_context_store import PresentationContextStore
+from services.chat.tools import ChatTools
 from services.database import get_async_session
+from llmai.shared import AssistantToolCall  # type: ignore[import-not-found]
+
+from pydantic import BaseModel
 
 
 CHAT_ROUTER = APIRouter(prefix="/chat", tags=["Chat"])
+
+
+class ExecuteChatToolRequest(BaseModel):
+    presentation_id: uuid.UUID
+    tool_name: str
+    arguments: dict = {}
+
+
+@CHAT_ROUTER.get("/tools")
+async def list_chat_tools(
+    presentation_id: uuid.UUID = Query(..., description="Presentation id"),
+    sql_session: AsyncSession = Depends(get_async_session),
+):
+    """Tool definitions the presentation chat can execute.
+
+    Each entry carries `name`, `description` and `input_schema` (JSON Schema)
+    — everything an external caller needs to invoke POST /chat/tool.
+    """
+    memory = PresentationContextStore(sql_session, presentation_id)
+    tools = ChatTools(memory)
+    definitions = []
+    for tool in tools.get_tool_definitions():
+        schema = tool.input_schema
+        if hasattr(schema, "model_json_schema"):
+            schema = schema.model_json_schema()
+        definitions.append(
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": schema,
+            }
+        )
+    return definitions
+
+
+@CHAT_ROUTER.post("/tool")
+async def execute_chat_tool(
+    payload: ExecuteChatToolRequest,
+    sql_session: AsyncSession = Depends(get_async_session),
+):
+    """Execute one presentation-chat tool call by name.
+
+    External agents use this to edit a stored deck — add/move/style elements,
+    insert or delete slides, set themes — without re-generating anything.
+    """
+    memory = PresentationContextStore(sql_session, payload.presentation_id)
+    tools = ChatTools(memory)
+    tools.set_turn_context(payload.tool_name)
+    result = await tools.execute_tool_call(
+        AssistantToolCall(
+            id="external",
+            name=payload.tool_name,
+            arguments=json.dumps(payload.arguments),
+        )
+    )
+    return result
 
 
 @CHAT_ROUTER.get("/conversations", response_model=list[ChatConversationListItem])
