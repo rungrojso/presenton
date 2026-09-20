@@ -142,7 +142,7 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
         web_search: bool = False,
         include_title_slide: bool = True,
         include_table_of_contents: bool = False,
-    ) -> dict:
+    ):
         """Generate a presentation and return its file + editor links.
 
         `template`: use a `template_arg` from list_templates.
