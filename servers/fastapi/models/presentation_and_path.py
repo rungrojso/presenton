@@ -17,3 +17,4 @@ class PresentationUrlsMixin(BaseModel):
 
 class PresentationPathAndEditPath(PresentationAndPath, PresentationUrlsMixin):
     edit_path: str
+    content_adjustments: list[str] | None = None

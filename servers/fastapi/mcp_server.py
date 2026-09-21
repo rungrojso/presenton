@@ -223,7 +223,9 @@ def create_mcp_server(name: str = "Presenton") -> FastMCP:
         `slides_content`: RENDER-ONLY mode — pass
         [{layout_index, content, speaker_note?}] authored against
         get_template_layouts' json_schemas; skips ALL server-side LLM calls
-        so the caller's model owns 100% of the writing.
+        so the caller's model owns 100% of the writing. Overlong strings are
+        auto-trimmed to the schema cap (see `content_adjustments` in the
+        result); missing required fields still fail with field-level errors.
         `layout_payload`: PIXEL-LEVEL mode — pass a full template-v2 layout
         definition (from get_template_layout_payload, edited to taste) to
         render your own component geometry instead of the stored template's.

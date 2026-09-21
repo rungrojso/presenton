@@ -508,19 +508,67 @@ def _insert_toc_layouts(
         structure.slides.insert(insertion_index + i, toc_slide_layout_index)
 
 
-def _validate_slides_content(
+def _clamp_text_to_schema(
+    value: Any,
+    schema: dict[str, Any],
+    field_path: str,
+    adjustments: list[str],
+) -> Any:
+    """Trim strings to their schema maxLength, at a word boundary when possible.
+
+    Template schemas derive their length caps from the original design, and
+    LLM-authored text routinely overshoots them. Trimming (and reporting it)
+    renders a usable slide; rejecting the whole deck does not.
+    """
+    if isinstance(value, dict) and isinstance(schema.get("properties"), dict):
+        for key, child_schema in schema["properties"].items():
+            if key in value and isinstance(child_schema, dict):
+                value[key] = _clamp_text_to_schema(
+                    value[key], child_schema, f"{field_path}.{key}", adjustments
+                )
+        return value
+
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        return [
+            _clamp_text_to_schema(item, schema["items"], f"{field_path}[{i}]", adjustments)
+            for i, item in enumerate(value)
+        ]
+
+    if not isinstance(value, str):
+        return value
+
+    max_length = schema.get("maxLength")
+    if not isinstance(max_length, int) or len(value) <= max_length:
+        return value
+
+    trimmed = value[:max_length]
+    if " " in trimmed[max_length // 2 :]:
+        boundary = trimmed.rfind(" ")
+        if boundary > 0:
+            trimmed = trimmed[:boundary]
+    adjustments.append(
+        f"{field_path.lstrip('.')}: trimmed from {len(value)} to "
+        f"{len(trimmed)} chars to fit the template"
+    )
+    return trimmed
+
+
+def _prepare_slides_content(
     layout_model: PresentationLayoutModel,
     slides_content: list[Any],
-) -> None:
-    """Fail fast when caller-authored slide content misses its layout schema.
+) -> list[str]:
+    """Clamp length overflows, then validate structure against layout schemas.
 
-    Without this, a missing field renders an empty slide silently; with it,
-    the caller gets a field-by-field list of what to fix.
+    Structural problems (missing required fields, unknown keys, wrong types,
+    out-of-range layout_index) still fail fast with a field-by-field list.
+    Length violations are auto-fitted and reported via the returned notes.
     """
     from jsonschema import Draft202012Validator
 
+    adjustments: list[str] = []
     problems: list[str] = []
     layout_total = len(layout_model.slides)
+
     for position, item in enumerate(slides_content):
         layout_index = item.layout_index
         if layout_index < 0 or layout_index >= layout_total:
@@ -531,11 +579,16 @@ def _validate_slides_content(
             continue
 
         schema = layout_model.slides[layout_index].json_schema
+        _clamp_text_to_schema(item.content, schema, f"slide {position}", adjustments)
+
         validator = Draft202012Validator(schema)
         for error in sorted(
             validator.iter_errors(item.content),
             key=lambda error: list(error.path),
         ):
+            # Length minimums are design hints — short text renders fine.
+            if error.validator == "minLength":
+                continue
             field_path = ".".join(str(part) for part in error.path) or "(root)"
             problems.append(
                 f"slide {position} (layout {layout_index}) field "
@@ -554,6 +607,7 @@ def _validate_slides_content(
                 + "\n- ".join(problems)
             ),
         )
+    return adjustments
 
 
 def _layout_count(layout_payload: Any) -> int:
@@ -2291,6 +2345,7 @@ async def generate_presentation_handler(
     try:
         using_slides_markdown = False
         using_slides_content = False
+        content_adjustments: list[str] = []
         language_to_use = (request.language or "").strip() or None
         additional_context = ""
 
@@ -2500,7 +2555,9 @@ async def generate_presentation_handler(
         total_slide_layouts = len(layout_model.slides)
 
         if using_slides_content:
-            _validate_slides_content(layout_model, request.slides_content)
+            content_adjustments = _prepare_slides_content(
+                layout_model, request.slides_content
+            )
 
         # Generate Structure — skipped entirely when the caller supplied
         # per-slide contents (their layout_index picks the layout directly).
@@ -2737,6 +2794,7 @@ async def generate_presentation_handler(
             PresentationPathAndEditPath(
                 **presentation_and_path.model_dump(),
                 edit_path=f"/presentation?id={presentation_id}",
+                content_adjustments=content_adjustments or None,
             )
         )
 
